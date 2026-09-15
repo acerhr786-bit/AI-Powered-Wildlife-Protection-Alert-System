@@ -1,0 +1,10 @@
+{
+  "name": "Nilgiris Wildlife & CCTV Conflict Alert System",
+  "description": "24/7 CCTV & live camera surveillance system for Gudalur, Nilgiris to monitor wild animal incursions in low light, prevent fatalities, and dispatch automated Forest Department alerts.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
