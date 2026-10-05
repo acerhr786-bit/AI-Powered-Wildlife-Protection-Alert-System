@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { CameraNode, DetectionEvent, ForestDeptAlert } from '../types/surveillance';
+import { CameraNode, DetectionEvent, ForestDeptAlert, BoundingBox } from '../types/surveillance';
 import { PRESET_DEMO_SCENARIOS, PresetDemoScenario } from '../data/gudalurData';
 import { audioAlert } from '../utils/audioAlert';
+import { detectionService } from '../services/detectionService';
+import { calculateWildlifeRisk } from '../services/riskEngine';
+import { alertService } from '../services/alertService';
 import {
   Camera,
   Video,
@@ -20,6 +23,13 @@ import {
   Sliders,
   Radio,
   Zap,
+  Maximize2,
+  Minimize2,
+  Upload,
+  Layers,
+  FileVideo,
+  Eye,
+  Info,
 } from 'lucide-react';
 
 interface LiveCameraFeedProps {
@@ -30,6 +40,7 @@ interface LiveCameraFeedProps {
   onHumanDetected: (event: DetectionEvent) => void;
   isMuted: boolean;
   onToggleMute: () => void;
+  onViewEvidence?: (item: any) => void;
 }
 
 export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
@@ -40,37 +51,66 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
   onHumanDetected,
   isMuted,
   onToggleMute,
+  onViewEvidence,
 }) => {
-  // Webcam state
+  // Feed source mode
+  const [feedSource, setFeedSource] = useState<'WEBCAM' | 'UPLOAD_VIDEO' | 'IP_CCTV' | 'DEMO_STREAM'>('DEMO_STREAM');
   const [isWebcamActive, setIsWebcamActive] = useState<boolean>(false);
   const [webcamError, setWebcamError] = useState<string | null>(null);
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
+  const [uploadedVideoSrc, setUploadedVideoSrc] = useState<string | null>(null);
+  const [uploadedVideoName, setUploadedVideoName] = useState<string>('');
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Low light / 24/7 vision mode
+  // Low light / 24/7 vision mode (Upgrade 10)
   const [nightVisionMode, setNightVisionMode] = useState<'IR' | 'STARVIS' | 'THERMAL' | 'STANDARD'>('IR');
   const [brightnessBoost, setBrightnessBoost] = useState<number>(140); // %
   const [contrastBoost, setContrastBoost] = useState<number>(130); // %
+  const [isGrayscaleIR, setIsGrayscaleIR] = useState<boolean>(true);
   const [currentLux, setCurrentLux] = useState<number>(0.02);
 
-  // Analysis / Detection state
+  // Detection & Bounding Box Overlay state (Upgrade 1 & 2)
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [autoContinuousScan, setAutoContinuousScan] = useState<boolean>(false);
+  const [currentBoxes, setCurrentBoxes] = useState<BoundingBox[]>([
+    {
+      x: 30,
+      y: 26,
+      width: 44,
+      height: 58,
+      label: 'Asian Elephant (98%)',
+      confidence: 98,
+      color: '#ef4444',
+    },
+  ]);
   const [lastDetectionResult, setLastDetectionResult] = useState<{
-    type: 'wild_animal' | 'human' | 'none' | null;
+    type: 'wild_animal' | 'human' | 'vehicle' | 'none' | null;
     species: string | null;
     confidence: number;
     details: string;
     forestAlertSent: boolean;
     ticketId?: string;
     timestamp?: string;
+    animalCount?: number;
+    humanNearby?: boolean;
+    riskLevel?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    riskReason?: string;
   }>({
-    type: null,
-    species: null,
-    confidence: 0,
-    details: '',
-    forestAlertSent: false,
+    type: 'wild_animal',
+    species: 'Asian Elephant (Elephas maximus)',
+    confidence: 98,
+    details: 'Adult solitary tusker moving along tea plantation contour near O-Valley.',
+    forestAlertSent: true,
+    ticketId: 'TN-FD-GDL-2026-8812',
+    timestamp: '22:14:08 IST',
+    animalCount: 1,
+    humanNearby: true,
+    riskLevel: 'CRITICAL',
+    riskReason: 'CRITICAL: Asian Elephant (1 animal) + Human detected in proximity + Nighttime (0.01 lux) in High-Conflict Zone.',
   });
 
   // 24/7 OSD clock
@@ -88,7 +128,7 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // WebRTC Camera startup
+  // WebRTC Webcam startup
   const startWebcam = async () => {
     setWebcamError(null);
     try {
@@ -111,17 +151,16 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
         videoRef.current.play();
       }
       setIsWebcamActive(true);
+      setFeedSource('WEBCAM');
 
-      // If user wasn't on My Personal Camera, select it
       const myCam = allCameras.find((c) => c.isPersonalCamera);
       if (myCam && currentCamera.id !== myCam.id) {
         onSelectCamera(myCam.id);
       }
     } catch (err: unknown) {
-      console.warn('Webcam permission / device error:', err);
-      const errMsg = err instanceof Error ? err.message : 'Webcam access denied or unavailable';
-      setWebcamError(errMsg);
-      setIsWebcamActive(false);
+      console.warn('Webcam permission or device error:', err);
+      setWebcamError('Camera hardware access unavailable. Operating in DEMO CAMERA Mode.');
+      setFeedSource('DEMO_STREAM');
     }
   };
 
@@ -134,99 +173,64 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
       videoRef.current.srcObject = null;
     }
     setIsWebcamActive(false);
-    setAutoContinuousScan(false);
+    setFeedSource('DEMO_STREAM');
   };
 
-  // Clean up webcam on unmount
-  useEffect(() => {
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, []);
+  // Video File Upload Handler (Upgrade 2)
+  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  // Capture frame from webcam or canvas
-  const captureFrameBase64 = (): string | null => {
-    if (!videoRef.current || !isWebcamActive) return null;
-    const canvas = canvasRef.current || document.createElement('canvas');
-    canvas.width = videoRef.current.videoWidth || 640;
-    canvas.height = videoRef.current.videoHeight || 480;
+    const url = URL.createObjectURL(file);
+    setUploadedVideoSrc(url);
+    setUploadedVideoName(file.name);
+    setFeedSource('UPLOAD_VIDEO');
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      setIsWebcamActive(false);
+    }
+  };
+
+  // Frame Capture for AI analysis
+  const captureFrameBase64 = useCallback((): string | null => {
+    if (!videoRef.current || !canvasRef.current) return null;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
-    // Apply low light filter transform if IR or thermal
-    if (nightVisionMode === 'IR') {
-      ctx.filter = `grayscale(100%) contrast(${contrastBoost}%) brightness(${brightnessBoost}%)`;
-    } else if (nightVisionMode === 'STARVIS') {
-      ctx.filter = `contrast(120%) brightness(${brightnessBoost + 20}%) saturate(140%)`;
-    } else {
-      ctx.filter = `contrast(${contrastBoost}%) brightness(${brightnessBoost}%)`;
-    }
-
-    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.85);
-  };
+  }, []);
 
-  // Process AI Detection (Live or Scenario)
+  // Main Detection Runner
   const runDetection = useCallback(
     async (scenario?: PresetDemoScenario) => {
       if (isScanning) return;
       setIsScanning(true);
 
       try {
-        let payload: Record<string, unknown> = {};
+        const frameBase64 = isWebcamActive ? captureFrameBase64() : '';
 
-        if (scenario) {
-          payload = {
-            scenarioId: scenario.id,
-            isLowLightMode: scenario.isLowLight,
-            cameraName: currentCamera.name,
-            sector: currentCamera.sector,
-          };
-        } else {
-          const frameBase64 = captureFrameBase64();
-          payload = {
-            imageBase64: frameBase64,
-            isLowLightMode: nightVisionMode !== 'STANDARD',
-            cameraName: currentCamera.name,
-            sector: currentCamera.sector,
-          };
+        // Run modular detection service
+        const event = scenario
+          ? detectionService.generateSimulatedInference(currentCamera, scenario.id)
+          : frameBase64
+          ? await detectionService.analyzeFrame(frameBase64, currentCamera)
+          : detectionService.generateSimulatedInference(currentCamera, 'demo-elephant-night');
+
+        // Bounding boxes
+        if (event.boundingBoxes && event.boundingBoxes.length > 0) {
+          setCurrentBoxes(event.boundingBoxes);
         }
 
-        const res = await fetch('/api/analyze-frame', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        const data = await res.json();
-
-        // 1. HUMAN DETECTED:
-        if (data.detected === 'human') {
+        // Logic check:
+        if (event.detectedType === 'human') {
           audioAlert.playHumanSafeChirp();
-
-          const event: DetectionEvent = {
-            id: `evt-${Date.now()}`,
-            cameraId: currentCamera.id,
-            cameraName: currentCamera.name,
-            location: currentCamera.location,
-            sector: currentCamera.sector,
-            coordinates: currentCamera.coordinates,
-            timestamp: new Date().toLocaleTimeString(),
-            detectedType: 'human',
-            species: data.species || 'Human (Villager / Estate Worker)',
-            confidence: data.confidence || 95,
-            isLowLight: nightVisionMode !== 'STANDARD',
-            luxLevel: currentLux,
-            threatLevel: 'SAFE',
-            forestDeptAlertRequired: false, // STRICT RULE: NO ALERT TO FOREST DEPT
-            alertStatus: 'NOT_REQUIRED',
-            details: data.details || 'Human movement detected in camera view. Verified safe. Forest alert suppressed.',
-            suggestedAction: 'Routine observation. No Forest Department dispatch required.',
-            source: currentCamera.isPersonalCamera ? 'my_camera' : 'cctv_network',
-          };
-
           setLastDetectionResult({
             type: 'human',
             species: event.species,
@@ -234,53 +238,29 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
             details: event.details,
             forestAlertSent: false,
             timestamp: event.timestamp,
+            animalCount: 0,
+            humanNearby: true,
+            riskLevel: 'LOW',
+            riskReason: event.riskAssessment?.reason,
           });
-
           onHumanDetected(event);
-        }
-        // 2. WILD ANIMAL DETECTED:
-        else if (data.detected === 'wild_animal' || data.detected === 'wild_animal_human_conflict') {
+        } else if (event.detectedType === 'wild_animal' || event.detectedType === 'wild_animal_human_conflict') {
           audioAlert.playWildlifeAlarm();
 
-          // Auto-dispatch Forest Department alert
-          const dispatchRes = await fetch('/api/forest-dept-dispatch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              cameraId: currentCamera.id,
-              cameraName: currentCamera.name,
-              species: data.species || 'Wild Animal (Tiger / Elephant / Leopard)',
-              threatLevel: data.threat_level || 'CRITICAL',
-              exactCoordinates: `${currentCamera.coordinates[0].toFixed(4)}° N, ${currentCamera.coordinates[1].toFixed(4)}° E`,
-              location: currentCamera.location,
-              suggestedAction: data.suggested_action,
-            }),
-          });
-
-          const dispatchData = await dispatchRes.json();
-          const alertRecord: ForestDeptAlert = dispatchData.alert;
-
-          const event: DetectionEvent = {
-            id: `evt-${Date.now()}`,
+          const alertRecord = alertService.createAlert({
+            eventId: event.id,
             cameraId: currentCamera.id,
             cameraName: currentCamera.name,
             location: currentCamera.location,
-            sector: currentCamera.sector,
             coordinates: currentCamera.coordinates,
-            timestamp: new Date().toLocaleTimeString(),
-            detectedType: 'wild_animal',
-            species: data.species || 'Wild Animal',
-            confidence: data.confidence || 96,
-            isLowLight: nightVisionMode !== 'STANDARD',
-            luxLevel: currentLux,
-            threatLevel: data.threat_level || 'CRITICAL',
-            forestDeptAlertRequired: true, // STRICT RULE: ALERT FOREST DEPT FOR PERSONAL CHECKUP
-            alertStatus: 'DISPATCHED',
-            dispatchTicketId: alertRecord?.ticketId,
-            details: data.details || 'Wild animal intrusion captured in camera zone. Automated alert forwarded to Forest Dept RRT.',
-            suggestedAction: data.suggested_action || 'Field patrol team mobilized for personal checkup.',
-            source: currentCamera.isPersonalCamera ? 'my_camera' : 'cctv_network',
-          };
+            species: event.species || 'Wild Animal',
+            threatLevel: (event.threatLevel === 'SAFE' ? 'LOW' : event.threatLevel) as any,
+            confidence: event.confidence,
+            riskAssessment: event.riskAssessment,
+            humanPresence: event.humanPresence,
+            animalCount: event.animalCount,
+            isDemoData: event.isDemoData,
+          });
 
           setLastDetectionResult({
             type: 'wild_animal',
@@ -288,295 +268,329 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
             confidence: event.confidence,
             details: event.details,
             forestAlertSent: true,
-            ticketId: alertRecord?.ticketId,
+            ticketId: alertRecord.ticketId,
             timestamp: event.timestamp,
+            animalCount: event.animalCount || 1,
+            humanNearby: event.humanPresence,
+            riskLevel: (event.threatLevel === 'SAFE' ? 'LOW' : event.threatLevel) as any,
+            riskReason: event.riskAssessment?.reason,
           });
 
           onAnimalDetected(event, alertRecord);
         } else {
-          // None / clear
           setLastDetectionResult({
             type: 'none',
             species: null,
-            confidence: 90,
-            details: 'Scan clear. No animal or human threat detected in camera field of view.',
+            confidence: 85,
+            details: 'Perimeter clear. No wildlife or human intrusions detected.',
             forestAlertSent: false,
-            timestamp: new Date().toLocaleTimeString(),
+            timestamp: event.timestamp,
+            riskLevel: 'LOW',
           });
+          setCurrentBoxes([]);
         }
       } catch (err) {
-        console.error('Detection analysis error:', err);
+        console.error('Detection failure:', err);
       } finally {
         setIsScanning(false);
       }
     },
-    [
-      isScanning,
-      currentCamera,
-      nightVisionMode,
-      contrastBoost,
-      brightnessBoost,
-      currentLux,
-      onAnimalDetected,
-      onHumanDetected,
-    ]
+    [isScanning, isWebcamActive, captureFrameBase64, currentCamera, onAnimalDetected, onHumanDetected]
   );
 
-  // 24/7 continuous automatic scan loop when enabled
+  // Auto 24/7 continuous scan timer
   useEffect(() => {
-    if (!autoContinuousScan) return;
-    const interval = setInterval(() => {
-      runDetection();
-    }, 12000);
-    return () => clearInterval(interval);
+    let interval: NodeJS.Timeout | null = null;
+    if (autoContinuousScan) {
+      interval = setInterval(() => {
+        runDetection();
+      }, 7000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [autoContinuousScan, runDetection]);
 
-  // Compute CSS filter string for live video feed
-  const getVideoFilter = () => {
-    if (nightVisionMode === 'IR') {
-      return `grayscale(100%) contrast(${contrastBoost}%) brightness(${brightnessBoost}%) drop-shadow(0 0 1px #22c55e)`;
-    } else if (nightVisionMode === 'STARVIS') {
-      return `contrast(${contrastBoost}%) brightness(${brightnessBoost + 15}%) saturate(135%)`;
-    } else if (nightVisionMode === 'THERMAL') {
-      return `contrast(180%) brightness(120%) hue-rotate(180deg) invert(100%)`;
+  // CSS Filter string for low-light night-vision enhancement (Upgrade 10)
+  const getFilterStyle = (): string => {
+    if (nightVisionMode === 'STANDARD') return 'none';
+    if (nightVisionMode === 'THERMAL') {
+      return `contrast(${contrastBoost + 20}%) brightness(${brightnessBoost}%) hue-rotate(180deg) saturate(200%)`;
     }
-    return `contrast(105%) brightness(105%)`;
+    if (nightVisionMode === 'STARVIS') {
+      return `brightness(${brightnessBoost + 10}%) contrast(${contrastBoost + 15}%) saturate(85%)`;
+    }
+    // IR Night Vision
+    const gray = isGrayscaleIR ? 'grayscale(100%)' : 'grayscale(60%)';
+    return `${gray} brightness(${brightnessBoost}%) contrast(${contrastBoost}%) sepia(20%) hue-rotate(85deg)`;
   };
 
   return (
-    <div id="live-camera-surveillance-feed" className="flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
-      {/* Top Camera Switcher & Status Bar */}
-      <div className="bg-slate-950 px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <div className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+    <div
+      id="live-camera-surveillance-module"
+      className={`flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl transition-all ${
+        isFullScreen ? 'fixed inset-0 z-50 rounded-none' : ''
+      }`}
+    >
+      {/* Top Telemetry Ribbon */}
+      <div className="bg-slate-950 px-4 py-2.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 text-emerald-400 font-mono font-bold">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>LIVE FEED:</span>
           </div>
-          <div>
-            <div className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
-              <span>{currentCamera.name}</span>
-              {currentCamera.isPersonalCamera && (
-                <span className="bg-cyan-950 text-cyan-400 border border-cyan-700 text-[10px] px-2 py-0.2 rounded font-mono font-semibold">
-                  ★ MY CAMERA
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] text-slate-400 font-mono">
-              {currentCamera.sector} • GPS: {currentCamera.coordinates[0].toFixed(4)}° N, {currentCamera.coordinates[1].toFixed(4)}° E
-            </div>
-          </div>
+          <span className="text-white font-bold tracking-tight">{currentCamera.name}</span>
+          {feedSource === 'DEMO_STREAM' && (
+            <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-mono px-2 py-0.2 rounded font-bold">
+              DEMO CAMERA
+            </span>
+          )}
+          {feedSource === 'WEBCAM' && (
+            <span className="bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[10px] font-mono px-2 py-0.2 rounded font-bold">
+              WEBCAM (LIVE)
+            </span>
+          )}
+          {feedSource === 'UPLOAD_VIDEO' && (
+            <span className="bg-purple-500/20 text-purple-300 border border-purple-500/40 text-[10px] font-mono px-2 py-0.2 rounded font-bold">
+              FILE: {uploadedVideoName}
+            </span>
+          )}
         </div>
 
-        {/* Camera Selector Buttons */}
-        <div className="flex items-center gap-1.5 overflow-x-auto max-w-full pb-1 sm:pb-0">
-          {allCameras.map((cam) => {
-            const isSelected = cam.id === currentCamera.id;
-            return (
-              <button
-                key={cam.id}
-                id={`btn-select-${cam.id}`}
-                onClick={() => onSelectCamera(cam.id)}
-                className={`px-2.5 py-1 text-xs font-mono rounded transition-all whitespace-nowrap ${
-                  isSelected
-                    ? 'bg-emerald-600 text-white font-bold ring-1 ring-emerald-400'
-                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700'
-                }`}
-              >
-                {cam.isPersonalCamera ? '★ My Camera' : cam.name.split(' ')[0]}
-              </button>
-            );
-          })}
+        {/* Source Switchers & Fullscreen */}
+        <div className="flex items-center gap-2">
+          {/* File Upload Button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="video/*,image/*"
+            className="hidden"
+            onChange={handleVideoUpload}
+          />
+
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-medium transition-colors text-[11px]"
+            title="Upload pre-recorded video clip or frame"
+          >
+            <Upload className="w-3 h-3 text-purple-400" />
+            <span className="hidden sm:inline">Upload Video</span>
+          </button>
+
+          {isWebcamActive ? (
+            <button
+              onClick={stopWebcam}
+              className="flex items-center gap-1 px-2.5 py-1 bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900 rounded font-medium transition-colors text-[11px]"
+            >
+              <VideoOff className="w-3 h-3" />
+              <span>Stop Webcam</span>
+            </button>
+          ) : (
+            <button
+              onClick={startWebcam}
+              className="flex items-center gap-1 px-2.5 py-1 bg-cyan-950 text-cyan-300 border border-cyan-800 hover:bg-cyan-900 rounded font-medium transition-colors text-[11px]"
+            >
+              <Video className="w-3 h-3" />
+              <span>Use Webcam</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => setIsFullScreen(!isFullScreen)}
+            className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition-colors"
+            title={isFullScreen ? 'Exit Full Screen' : 'Full Screen Camera'}
+          >
+            {isFullScreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+          </button>
         </div>
       </div>
 
-      {/* Main Viewport Window */}
-      <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden select-none">
-        {/* Real Live Webcam Feed or Simulated 24/7 Trail Cam */}
-        {isWebcamActive ? (
+      {/* Main Viewport Container */}
+      <div className="relative aspect-video bg-black overflow-hidden flex items-center justify-center select-none group">
+        {/* Real video or Simulated canvas */}
+        {feedSource === 'WEBCAM' ? (
           <video
             ref={videoRef}
             playsInline
             muted
             autoPlay
-            style={{ filter: getVideoFilter() }}
-            className="w-full h-full object-cover transition-all duration-300"
+            style={{ filter: getFilterStyle() }}
+            className="w-full h-full object-cover"
+          />
+        ) : feedSource === 'UPLOAD_VIDEO' && uploadedVideoSrc ? (
+          <video
+            src={uploadedVideoSrc}
+            controls
+            autoPlay
+            loop
+            style={{ filter: getFilterStyle() }}
+            className="w-full h-full object-contain"
           />
         ) : (
+          /* Simulated Demo Camera Feed (Upgrade 16) */
           <div
-            style={{ filter: getVideoFilter() }}
-            className="relative w-full h-full flex items-center justify-center bg-radial from-slate-900 to-black p-6"
+            style={{ filter: getFilterStyle() }}
+            className="w-full h-full bg-gradient-to-b from-slate-950 via-slate-900 to-emerald-950 flex flex-col items-center justify-center relative overflow-hidden"
           >
-            {/* Background simulated forest tea estate silhouette for testing */}
-            <div className="absolute inset-0 opacity-20 pointer-events-none bg-[radial-gradient(#22c55e_1px,transparent_1px)] [background-size:16px_16px]"></div>
+            <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:20px_20px] opacity-40 pointer-events-none" />
             
-            <div className="text-center z-10 max-w-md space-y-3 bg-slate-950/80 p-6 rounded-xl border border-slate-800 backdrop-blur-md">
-              <div className="w-12 h-12 rounded-full bg-cyan-950/60 border border-cyan-600/40 text-cyan-400 flex items-center justify-center mx-auto">
-                <Camera className="w-6 h-6" />
+            {/* Background wildlife silhouette simulation */}
+            <div className="text-center space-y-2 relative z-10 opacity-70">
+              <Camera className="w-16 h-16 text-emerald-500/40 mx-auto" />
+              <div className="text-sm font-bold text-slate-300 tracking-wider">
+                {currentCamera.name}
               </div>
-              <div>
-                <h4 className="text-base font-semibold text-slate-100">
-                  {currentCamera.isPersonalCamera ? 'My Personal Camera (Field Post)' : currentCamera.name}
-                </h4>
-                <p className="text-xs text-slate-400 mt-1">
-                  {currentCamera.isPersonalCamera
-                    ? 'Connect your personal laptop or mobile camera for real-time 24/7 AI monitoring and low-light detection.'
-                    : 'Network CCTV node active in Gudalur forest corridor. Analyzing sensor telemetry.'}
-                </p>
+              <div className="text-xs font-mono text-slate-400">
+                24/7 LOW-LIGHT CCTV MONITORING STREAM • {currentCamera.sector}
               </div>
-
-              {currentCamera.isPersonalCamera ? (
-                <button
-                  id="btn-start-my-webcam"
-                  onClick={startWebcam}
-                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-medium text-sm rounded-lg shadow-lg shadow-cyan-900/30 transition-all cursor-pointer"
-                >
-                  <Video className="w-4 h-4" />
-                  <span>Start My Camera (Webcam Feed)</span>
-                </button>
-              ) : (
-                <div className="text-xs font-mono text-emerald-400 bg-emerald-950/50 py-1.5 px-3 rounded border border-emerald-800">
-                  ● 24/7 CCTV Feed Connected via Nilgiris Forest Mesh Network
-                </div>
-              )}
-
-              {webcamError && (
-                <div className="text-xs text-rose-400 bg-rose-950/60 p-2 rounded border border-rose-800">
-                  {webcamError} (You can still run presets below)
-                </div>
-              )}
+              <div className="text-[11px] bg-slate-950/80 text-amber-300 font-mono px-3 py-1 rounded-full border border-amber-600/40 inline-block">
+                DEMO CAMERA MODE ACTIVE (Hardware Emulation)
+              </div>
             </div>
           </div>
         )}
 
         <canvas ref={canvasRef} className="hidden" />
 
-        {/* 24/7 Surveillance On-Screen Display (OSD) Overlay */}
-        <div className="absolute inset-0 pointer-events-none p-4 flex flex-col justify-between text-xs font-mono text-emerald-400/90 drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
-          {/* OSD Top Row */}
+        {/* Bounding Box Visual Overlays (Upgrade 1 & 2) */}
+        {currentBoxes.map((box, idx) => (
+          <div
+            key={idx}
+            style={{
+              position: 'absolute',
+              left: `${box.x}%`,
+              top: `${box.y}%`,
+              width: `${box.width}%`,
+              height: `${box.height}%`,
+              borderColor: box.color || '#ef4444',
+            }}
+            className="border-2 border-dashed rounded bg-red-500/10 pointer-events-none transition-all flex flex-col justify-start z-20"
+          >
+            <div
+              style={{ backgroundColor: box.color || '#ef4444' }}
+              className="text-black text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-br w-max uppercase flex items-center gap-1 shadow"
+            >
+              <span>{box.label}</span>
+              <span>•</span>
+              <span>{box.confidence}%</span>
+            </div>
+          </div>
+        ))}
+
+        {/* OSD HUD Elements */}
+        <div className="absolute inset-0 pointer-events-none p-4 flex flex-col justify-between z-20 font-mono">
+          {/* Top row */}
           <div className="flex items-start justify-between">
-            <div className="space-y-0.5 bg-black/60 backdrop-blur-sm p-2 rounded border border-emerald-900/40">
-              <div className="flex items-center gap-2 font-bold text-sm">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block animate-ping"></span>
-                <span className="text-red-400">REC 24/7</span>
-                <span className="text-slate-200">|</span>
-                <span className="text-emerald-300">{currentCamera.name}</span>
+            <div className="bg-black/70 backdrop-blur-sm px-2.5 py-1.5 rounded border border-emerald-900/60 text-[11px] text-emerald-400 space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-white tracking-widest">
+                  CAM_ID: {currentCamera.id.toUpperCase()}
+                </span>
+                <span className="text-slate-500">|</span>
+                <span className="text-amber-300">
+                  {nightVisionMode === 'IR' ? '850nm IR NIGHT-VISION' : nightVisionMode}
+                </span>
               </div>
-              <div className="text-[11px] text-slate-300">
-                SENSOR: {nightVisionMode} MODE • LUX: {currentLux} • FPS: 30
-              </div>
-              <div className="text-[10px] text-slate-400">
-                SECTOR: {currentCamera.sector}
+              <div className="text-slate-400 text-[10px]">
+                TIME: {osdTime || '2026-10-04 22:14:08.241'} IST
               </div>
             </div>
 
-            <div className="text-right bg-black/60 backdrop-blur-sm p-2 rounded border border-emerald-900/40">
-              <div className="font-bold text-slate-100">{osdTime || '2026-09-10 03:41:19.421'}</div>
-              <div className="text-[11px] text-amber-300 font-semibold">
-                NILGIRIS GUDALUR CORRIDOR
+            <div className="bg-black/70 backdrop-blur-sm px-2.5 py-1.5 rounded border border-emerald-900/60 text-[11px] text-right space-y-0.5">
+              <div className="text-slate-300 font-bold">
+                SENSOR: {currentLux} LUX
               </div>
-              <div className="text-[10px] text-slate-400">BATTERY: {currentCamera.batteryPercent}% (SOLAR/IR)</div>
+              <div className="text-emerald-400 text-[10px]">
+                SOLAR: {currentCamera.batteryPercent}% ({currentCamera.solarStatus})
+              </div>
             </div>
           </div>
 
-          {/* Tactical Crosshair / Bounding Box Grid */}
-          <div className="absolute inset-x-12 inset-y-12 border border-emerald-500/20 pointer-events-none flex items-center justify-center">
-            <div className="w-8 h-8 border-t-2 border-l-2 border-emerald-400/60 absolute top-0 left-0"></div>
-            <div className="w-8 h-8 border-t-2 border-r-2 border-emerald-400/60 absolute top-0 right-0"></div>
-            <div className="w-8 h-8 border-b-2 border-l-2 border-emerald-400/60 absolute bottom-0 left-0"></div>
-            <div className="w-8 h-8 border-b-2 border-r-2 border-emerald-400/60 absolute bottom-0 right-0"></div>
-
-            {/* Crosshair Center */}
-            <div className="w-4 h-0.5 bg-emerald-400/40"></div>
-            <div className="h-4 w-0.5 bg-emerald-400/40 absolute"></div>
-
-            {/* Active Detection Visual Banner inside HUD */}
+          {/* Center Alert Notification Popups */}
+          <div className="pointer-events-auto max-w-md mx-auto w-full">
             {lastDetectionResult.type === 'human' && (
-              <div className="absolute inset-x-6 top-8 bg-cyan-950/90 border-2 border-cyan-400 text-cyan-200 p-3 rounded-lg backdrop-blur-md shadow-2xl pointer-events-auto">
+              <div className="bg-cyan-950/95 border-2 border-cyan-500 text-cyan-100 p-3 rounded-xl backdrop-blur-md shadow-2xl animate-fade-in">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 font-bold text-xs uppercase text-white">
                     <CheckCircle2 className="w-5 h-5 text-cyan-400" />
-                    <span className="font-bold text-sm tracking-wide text-white uppercase">
-                      HUMAN DETECTED: {lastDetectionResult.species}
-                    </span>
+                    <span>HUMAN MOVEMENT DETECTED (SAFE)</span>
                   </div>
-                  <span className="bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded text-[11px]">
-                    {lastDetectionResult.confidence}% CONFIDENCE
+                  <span className="bg-cyan-500/20 text-cyan-300 font-bold px-2 py-0.5 rounded text-[10px]">
+                    {lastDetectionResult.confidence}% CONF
                   </span>
                 </div>
-                <div className="mt-1.5 text-xs text-slate-300">
-                  {lastDetectionResult.details}
-                </div>
-                <div className="mt-2 text-[11px] font-semibold text-emerald-400 bg-emerald-950/80 border border-emerald-700/60 px-2 py-1 rounded flex items-center gap-1.5">
-                  <Zap className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>POLICY ENFORCED: Forest Department Alert Suppressed (Human only - No false alert dispatched).</span>
+                <p className="mt-1 text-xs text-slate-300">{lastDetectionResult.details}</p>
+                <div className="mt-2 text-[10px] font-semibold text-emerald-400 bg-emerald-950/80 border border-emerald-700/60 px-2 py-1 rounded">
+                  ✓ POLICY ENFORCED: Forest Department dispatch suppressed for humans.
                 </div>
               </div>
             )}
 
             {lastDetectionResult.type === 'wild_animal' && (
-              <div className="absolute inset-x-6 top-8 bg-red-950/95 border-2 border-red-500 text-red-100 p-3 rounded-lg backdrop-blur-md shadow-2xl animate-pulse pointer-events-auto">
+              <div className="bg-red-950/95 border-2 border-red-500 text-red-100 p-3 rounded-xl backdrop-blur-md shadow-2xl animate-fade-in space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <AlertTriangle className="w-6 h-6 text-red-400 animate-bounce" />
-                    <span className="font-bold text-sm tracking-wider text-white uppercase">
-                      ⚠️ CRITICAL ALERT: WILD ANIMAL CAPTURED
+                    <AlertTriangle className="w-5 h-5 text-red-400 animate-bounce" />
+                    <span className="font-bold text-xs uppercase text-white tracking-wide">
+                      ⚠️ WILD ANIMAL INTRUSION CAPTURED
                     </span>
                   </div>
-                  <span className="bg-red-500 text-white font-bold px-2 py-0.5 rounded text-[11px]">
-                    SPECIES: {lastDetectionResult.species}
+                  <span className="bg-red-600 text-white font-bold px-2 py-0.5 rounded text-[10px]">
+                    {lastDetectionResult.riskLevel || 'CRITICAL'} RISK
                   </span>
                 </div>
-                <div className="mt-1.5 text-xs text-red-200">
-                  {lastDetectionResult.details}
+
+                <div className="text-xs text-slate-200">
+                  <strong>{lastDetectionResult.species}</strong> ({lastDetectionResult.confidence}% confidence)
                 </div>
-                <div className="mt-2 text-[11px] font-bold text-amber-300 bg-black/70 border border-amber-600/70 px-2 py-1 rounded flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Send className="w-3.5 h-3.5 text-amber-400" />
-                    <span>AUTOMATIC FOREST DEPARTMENT DISPATCH ACTIVE: Ticket #{lastDetectionResult.ticketId}</span>
-                  </div>
+
+                {lastDetectionResult.riskReason && (
+                  <p className="text-[11px] text-red-200 bg-black/40 p-2 rounded border border-red-900/60 leading-relaxed font-sans">
+                    {lastDetectionResult.riskReason}
+                  </p>
+                )}
+
+                <div className="text-[10px] font-bold text-amber-300 bg-black/70 border border-amber-600/70 p-2 rounded flex items-center justify-between">
+                  <span>DISPATCH TICKET #{lastDetectionResult.ticketId}</span>
                   <span className="text-red-400">RRT Mobilized</span>
                 </div>
               </div>
             )}
           </div>
 
-          {/* OSD Bottom Row */}
-          <div className="flex items-end justify-between">
-            <div className="bg-black/60 backdrop-blur-sm px-2.5 py-1.5 rounded border border-emerald-900/40 text-[11px] text-slate-300">
-              FIELD OF VIEW: {currentCamera.fovAngle}° • ENCRYPTION: AES-256 MESH
+          {/* Bottom row */}
+          <div className="flex items-end justify-between text-[10px] text-slate-400">
+            <div className="bg-black/60 px-2 py-1 rounded">
+              FOV: {currentCamera.fovAngle}° • FPS: 30 • 1080P
             </div>
-
-            <div className="bg-black/60 backdrop-blur-sm px-2.5 py-1.5 rounded border border-emerald-900/40 text-[11px] text-emerald-300 font-semibold">
+            <div className="bg-black/60 px-2 py-1 rounded text-emerald-400">
               TAMIL NADU FOREST DEPT EARLY WARNING LINK: ACTIVE
             </div>
           </div>
         </div>
-
-        {/* Scan line effect */}
-        <div className="absolute inset-x-0 h-1 bg-emerald-500/30 blur-xs animate-scanline pointer-events-none"></div>
       </div>
 
-      {/* Control Panel: Night Vision Filters & AI Detection Trigger */}
+      {/* Control Panel: Low-Light Enhancements & Detection Triggers */}
       <div className="p-4 bg-slate-950 border-t border-slate-800 space-y-4">
-        {/* Row 1: Low Light Sensor Modes & Live Actions */}
+        {/* Row 1: Low-Light Modes & Scan Triggers */}
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Night Vision Mode Selector */}
+          {/* Night Vision Sensor Selector */}
           <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
             <span className="text-[11px] font-semibold text-slate-400 px-2 flex items-center gap-1">
               <Sliders className="w-3.5 h-3.5" />
-              Low Light Sensor:
+              Sensor Mode:
             </span>
 
             <button
-              id="mode-ir-night"
               onClick={() => {
                 setNightVisionMode('IR');
                 setCurrentLux(0.01);
+                setIsGrayscaleIR(true);
               }}
               className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-all ${
                 nightVisionMode === 'IR'
-                  ? 'bg-emerald-600 text-white font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                  ? 'bg-emerald-600 text-white font-bold'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
               <Moon className="w-3.5 h-3.5" />
@@ -584,15 +598,15 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
             </button>
 
             <button
-              id="mode-starvis"
               onClick={() => {
                 setNightVisionMode('STARVIS');
                 setCurrentLux(0.04);
+                setIsGrayscaleIR(false);
               }}
               className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-all ${
                 nightVisionMode === 'STARVIS'
-                  ? 'bg-emerald-600 text-white font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                  ? 'bg-emerald-600 text-white font-bold'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
               <Sun className="w-3.5 h-3.5" />
@@ -600,44 +614,27 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
             </button>
 
             <button
-              id="mode-thermal"
-              onClick={() => {
-                setNightVisionMode('THERMAL');
-                setCurrentLux(0.005);
-              }}
-              className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-all ${
-                nightVisionMode === 'THERMAL'
-                  ? 'bg-amber-600 text-white font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800'
-              }`}
-            >
-              <Flame className="w-3.5 h-3.5" />
-              Thermal Vision
-            </button>
-
-            <button
-              id="mode-standard"
               onClick={() => {
                 setNightVisionMode('STANDARD');
                 setCurrentLux(250);
+                setIsGrayscaleIR(false);
               }}
               className={`px-2.5 py-1 text-xs font-medium rounded transition-all ${
                 nightVisionMode === 'STANDARD'
                   ? 'bg-slate-700 text-white font-bold'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  : 'text-slate-400 hover:text-white'
               }`}
             >
-              Standard RGB
+              Day RGB
             </button>
           </div>
 
-          {/* Primary AI Scan & Continuous Monitor Buttons */}
+          {/* Trigger Scan Buttons */}
           <div className="flex items-center gap-2">
             <button
-              id="btn-trigger-ai-scan"
               disabled={isScanning}
               onClick={() => runDetection()}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-md shadow-emerald-950 transition-all cursor-pointer"
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-lg shadow-lg shadow-emerald-950 transition-all cursor-pointer"
             >
               {isScanning ? (
                 <>
@@ -647,13 +644,12 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
               ) : (
                 <>
                   <Scan className="w-4 h-4" />
-                  <span>Scan Live Camera Now</span>
+                  <span>Scan Live Frame</span>
                 </>
               )}
             </button>
 
             <button
-              id="btn-toggle-continuous-scan"
               onClick={() => setAutoContinuousScan(!autoContinuousScan)}
               className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border transition-all ${
                 autoContinuousScan
@@ -662,116 +658,89 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
               }`}
             >
               <Activity className="w-3.5 h-3.5 text-emerald-400" />
-              {autoContinuousScan ? '24/7 Auto-Scan ON' : 'Start 24/7 Auto-Scan'}
+              {autoContinuousScan ? '24/7 Scan ON' : 'Start 24/7 Auto-Scan'}
             </button>
-
-            {isWebcamActive ? (
-              <button
-                id="btn-stop-webcam"
-                onClick={stopWebcam}
-                className="flex items-center gap-1.5 px-3 py-2 bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-800 text-xs font-medium rounded-lg transition-colors"
-              >
-                <VideoOff className="w-3.5 h-3.5" />
-                Stop Camera
-              </button>
-            ) : (
-              <button
-                id="btn-use-my-camera"
-                onClick={startWebcam}
-                className="flex items-center gap-1.5 px-3 py-2 bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 text-xs font-medium rounded-lg transition-colors"
-              >
-                <Video className="w-3.5 h-3.5" />
-                Use My Camera
-              </button>
-            )}
           </div>
         </div>
 
-        {/* Row 2: Low-Light Image Calibration Sliders (Contrast / Brightness) */}
+        {/* Row 2: Low-Light Calibration Sliders (Upgrade 10) */}
         {nightVisionMode !== 'STANDARD' && (
-          <div className="flex flex-wrap items-center gap-6 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800 text-xs">
+          <div className="flex flex-wrap items-center gap-6 bg-slate-900/80 p-3 rounded-xl border border-slate-800 text-xs">
             <span className="text-slate-400 font-semibold flex items-center gap-1">
               <Sliders className="w-3.5 h-3.5 text-emerald-400" />
-              Night Sensor Gain Calibration:
+              Image Enhancements (Upgrade 10):
             </span>
 
             <div className="flex items-center gap-2">
-              <span className="text-slate-400">Brightness ({brightnessBoost}%):</span>
+              <span className="text-slate-400 font-mono text-[11px]">Brightness ({brightnessBoost}%):</span>
               <input
                 type="range"
                 min="100"
                 max="250"
                 value={brightnessBoost}
                 onChange={(e) => setBrightnessBoost(Number(e.target.value))}
-                className="w-28 accent-emerald-500 cursor-pointer"
+                className="w-24 accent-emerald-500 cursor-pointer"
               />
             </div>
 
             <div className="flex items-center gap-2">
-              <span className="text-slate-400">Contrast ({contrastBoost}%):</span>
+              <span className="text-slate-400 font-mono text-[11px]">Contrast ({contrastBoost}%):</span>
               <input
                 type="range"
                 min="100"
                 max="220"
                 value={contrastBoost}
                 onChange={(e) => setContrastBoost(Number(e.target.value))}
-                className="w-28 accent-emerald-500 cursor-pointer"
+                className="w-24 accent-emerald-500 cursor-pointer"
               />
             </div>
 
-            <span className="text-emerald-400/80 font-mono text-[11px] ml-auto">
-              Optimized for Nilgiris Pitch-Black Night Conditions (0.01 - 0.05 Lux)
+            <label className="flex items-center gap-1.5 cursor-pointer text-slate-300 text-xs">
+              <input
+                type="checkbox"
+                checked={isGrayscaleIR}
+                onChange={(e) => setIsGrayscaleIR(e.target.checked)}
+                className="rounded text-emerald-500"
+              />
+              <span>Grayscale IR Mode</span>
+            </label>
+
+            <span className="text-slate-400 text-[11px] italic ml-auto hidden md:inline">
+              *Software low-light & Starvis contrast boost (Not FLIR thermal hardware).
             </span>
           </div>
         )}
 
-        {/* Row 3: Preset Demonstration Scenarios (Crucial for testing the logic!) */}
-        <div className="pt-2 border-t border-slate-800/80">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+        {/* Row 3: Preset Demonstration Scenarios (Upgrade 1 & 16) */}
+        <div className="pt-2 border-t border-slate-800/80 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-semibold text-slate-300 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>College Project Demonstration Scenarios (Test User Intent Rules):</span>
-            </div>
+              <span>Demonstration Scenarios [DEMO DATA Mode]:</span>
+            </span>
             <span className="text-[11px] text-slate-400">
-              Simulates low-light sensor captures in Gudalur Division
+              Simulates detection across all key wildlife species
             </span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2">
-            {PRESET_DEMO_SCENARIOS.map((scenario) => {
-              const isAnimal = scenario.animalOrHuman === 'wild_animal';
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+            {PRESET_DEMO_SCENARIOS.map((sc) => {
+              const isCrit = sc.threatLevel === 'CRITICAL';
               return (
                 <button
-                  key={scenario.id}
-                  id={`btn-demo-${scenario.id}`}
+                  key={sc.id}
                   disabled={isScanning}
-                  onClick={() => runDetection(scenario)}
-                  className={`p-2 rounded-lg border text-left transition-all group flex flex-col justify-between ${
-                    isAnimal
+                  onClick={() => runDetection(sc)}
+                  className={`p-2 rounded-lg border text-left transition-all flex flex-col justify-between text-xs ${
+                    isCrit
                       ? 'bg-red-950/30 hover:bg-red-950/60 border-red-900/50 hover:border-red-600'
-                      : 'bg-cyan-950/30 hover:bg-cyan-950/60 border-cyan-900/50 hover:border-cyan-600'
+                      : 'bg-slate-900 hover:bg-slate-800 border-slate-800 hover:border-slate-700'
                   }`}
                 >
-                  <div>
-                    <div className="flex items-center justify-between text-[11px] font-bold">
-                      <span className={isAnimal ? 'text-red-400' : 'text-cyan-400'}>
-                        {scenario.name}
-                      </span>
-                      <span
-                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                          isAnimal ? 'bg-red-900 text-red-200' : 'bg-cyan-900 text-cyan-200'
-                        }`}
-                      >
-                        {isAnimal ? 'ALERT FOREST' : 'HUMAN (NO ALERT)'}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-1 line-clamp-2">
-                      {scenario.description}
-                    </p>
-                  </div>
-                  <div className="mt-2 pt-1 border-t border-slate-800 text-[9px] font-semibold text-slate-300 flex items-center justify-between">
-                    <span>{scenario.isLowLight ? '🌙 Low-Light IR' : '☀️ Daylight'}</span>
-                    <span className={isAnimal ? 'text-amber-400' : 'text-emerald-400'}>Test Logic →</span>
+                  <div className="font-bold text-white text-[11px] truncate">{sc.species}</div>
+                  <div className="flex items-center justify-between mt-1 text-[10px] font-mono">
+                    <span className="text-slate-400">{sc.threatLevel}</span>
+                    <span className="text-emerald-400 font-bold">Simulate →</span>
                   </div>
                 </button>
               );

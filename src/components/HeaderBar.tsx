@@ -16,14 +16,39 @@ import {
   FolderArchive,
   ChevronDown,
   ExternalLink,
+  UserCheck,
+  Compass,
+  BarChart3,
+  Camera,
+  Server,
+  Eye,
+  Sliders,
 } from 'lucide-react';
+import { UserRole } from '../types/surveillance';
+
+export type ActiveTabType =
+  | 'DASHBOARD'
+  | 'SURVEILLANCE'
+  | 'MAP'
+  | 'FOREST_DISPATCH'
+  | 'INCIDENTS'
+  | 'ANIMAL_ACTIVITY'
+  | 'ANALYTICS'
+  | 'CASUALTIES'
+  | 'CAMERAS'
+  | 'SYSTEM_HEALTH'
+  | 'FEED';
 
 interface HeaderBarProps {
   isMuted: boolean;
   onToggleMute: () => void;
-  activeTab: 'SURVEILLANCE' | 'MAP' | 'FOREST_DISPATCH' | 'CASUALTIES' | 'FEED';
-  onSelectTab: (tab: 'SURVEILLANCE' | 'MAP' | 'FOREST_DISPATCH' | 'CASUALTIES' | 'FEED') => void;
+  activeTab: ActiveTabType;
+  onSelectTab: (tab: ActiveTabType) => void;
   activeAlertCount: number;
+  currentRole: UserRole;
+  onSelectRole: (role: UserRole) => void;
+  isDemoMode: boolean;
+  onToggleDemoMode: () => void;
   onDownloadReport: () => void;
   onDownloadCasualtiesCSV: () => void;
   onDownloadAlertsCSV: () => void;
@@ -35,38 +60,110 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   activeTab,
   onSelectTab,
   activeAlertCount,
+  currentRole,
+  onSelectRole,
+  isDemoMode,
+  onToggleDemoMode,
   onDownloadReport,
   onDownloadCasualtiesCSV,
   onDownloadAlertsCSV,
 }) => {
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [showRoleMenu, setShowRoleMenu] = useState(false);
   const [showZipModal, setShowZipModal] = useState(false);
+
+  const roles: { key: UserRole; label: string; desc: string }[] = [
+    { key: 'ADMIN', label: 'Admin (Full Access)', desc: 'Configure hardware, AI thresholds, all permissions' },
+    { key: 'FOREST_OFFICER', label: 'Forest Officer', desc: 'RRT dispatch, alert triage, incident logging' },
+    { key: 'CONTROL_ROOM_OPERATOR', label: 'Control Room Operator', desc: 'Continuous camera surveillance & telemetry' },
+    { key: 'RESEARCHER', label: 'Wildlife Researcher', desc: 'Analytics, conflict trends, academic data exports' },
+    { key: 'VIEWER', label: 'Public / Field Viewer', desc: 'Read-only perimeter view & safety advisories' },
+  ];
+
   return (
-    <header id="surveillance-app-header" className="bg-slate-950 border-b border-slate-800 sticky top-0 z-50">
+    <header id="surveillance-app-header" className="bg-slate-950 border-b border-slate-800 sticky top-0 z-50 shadow-xl">
       {/* Topmost Tactical Telemetry Ribbon */}
-      <div className="bg-slate-900/90 border-b border-slate-800/80 px-4 py-1 text-[11px] font-mono flex flex-wrap items-center justify-between gap-2 text-slate-400">
+      <div className="bg-slate-900/90 border-b border-slate-800/80 px-4 py-1.5 text-[11px] font-mono flex flex-wrap items-center justify-between gap-2 text-slate-400">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-emerald-400">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block"></span>
             <span className="font-bold">24/7 SURVEILLANCE RUNNING</span>
           </div>
+
           <span className="text-slate-600">|</span>
-          <div className="flex items-center gap-1 text-slate-300">
+
+          {/* Demo Mode Badge (Upgrade 16) */}
+          <button
+            onClick={onToggleDemoMode}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded font-bold transition-all ${
+              isDemoMode
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30'
+                : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+            }`}
+            title="Click to toggle Demo simulation / Live mode"
+          >
+            <span>{isDemoMode ? 'DEMO DATA ACTIVE' : 'LIVE TELEMETRY'}</span>
+          </button>
+
+          <span className="text-slate-600 hidden sm:inline">|</span>
+
+          <div className="hidden sm:flex items-center gap-1 text-slate-300">
             <Radio className="w-3 h-3 text-cyan-400" />
             <span>REGION: GUDALUR, NILGIRIS (TN)</span>
           </div>
-          <span className="text-slate-600 hidden sm:inline">|</span>
-          <div className="hidden sm:flex items-center gap-1 text-slate-300">
+
+          <span className="text-slate-600 hidden md:inline">|</span>
+
+          <div className="hidden md:flex items-center gap-1 text-slate-300">
             <Moon className="w-3 h-3 text-amber-400" />
-            <span>NIGHT-VISION SENSORS: 0.01-0.04 LUX</span>
+            <span>IR SENSORS: 0.01-0.04 LUX</span>
           </div>
         </div>
 
+        {/* User Role Switcher & Audio Mute (Upgrade 12) */}
         <div className="flex items-center gap-3">
-          <div className="text-amber-300 flex items-center gap-1">
-            <PhoneCall className="w-3 h-3" />
-            <span>FOREST DEPT HOTLINE: 1800-425-4545</span>
+          {/* Role selector dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setShowRoleMenu(!showRoleMenu)}
+              className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 transition-colors text-[11px]"
+            >
+              <UserCheck className="w-3 h-3 text-cyan-400" />
+              <span>ROLE: {currentRole.replace('_', ' ')}</span>
+              <ChevronDown className="w-3 h-3 text-slate-400" />
+            </button>
+
+            {showRoleMenu && (
+              <div className="absolute right-0 mt-1 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-1.5 z-50 text-xs font-sans space-y-1">
+                <div className="px-2 py-1 text-[10px] font-mono text-slate-400 uppercase border-b border-slate-800">
+                  Switch Active Role (RBAC)
+                </div>
+                {roles.map((r) => (
+                  <button
+                    key={r.key}
+                    onClick={() => {
+                      onSelectRole(r.key);
+                      setShowRoleMenu(false);
+                    }}
+                    className={`w-full text-left p-2 rounded-lg transition-colors flex flex-col ${
+                      currentRole === r.key
+                        ? 'bg-emerald-950 text-emerald-300 font-bold border border-emerald-800'
+                        : 'text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">{r.label}</span>
+                    <span className="text-[10px] text-slate-400">{r.desc}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
+
+          <div className="text-amber-300 hidden lg:flex items-center gap-1">
+            <PhoneCall className="w-3 h-3" />
+            <span>HOTLINE: 1800-425-4545</span>
+          </div>
+
           <button
             id="btn-toggle-audio-siren"
             onClick={onToggleMute}
@@ -82,7 +179,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
         </div>
       </div>
 
-      {/* Main App Title & Tab Navigation */}
+      {/* Main Title & Action Bar */}
       <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-600 to-cyan-700 flex items-center justify-center text-white shadow-lg shadow-emerald-950">
@@ -92,220 +189,171 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             <h1 className="text-base sm:text-lg font-bold text-white tracking-tight flex items-center gap-2">
               <span>Nilgiris Wildlife Early Warning & Conflict Mitigation</span>
               <span className="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700 font-mono hidden md:inline">
-                COLLEGE PROJECT
+                CONTROL CENTER
               </span>
             </h1>
             <p className="text-xs text-slate-400">
-              Automated CCTV & Personal Camera 24/7 AI Surveillance • Gudalur Division, Tamil Nadu
+              AI-Powered Surveillance, Ingress Tracking & Rapid Response System • Gudalur Forest Division, Tamil Nadu
             </p>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <nav className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800 overflow-x-auto">
+        {/* Download Project Files & Datasets Dropdown Menu */}
+        <div className="relative">
           <button
-            id="tab-surveillance"
-            onClick={() => onSelectTab('SURVEILLANCE')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-              activeTab === 'SURVEILLANCE'
-                ? 'bg-emerald-600 text-white shadow'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
+            onClick={() => setShowDownloadMenu(!showDownloadMenu)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg border border-slate-700 transition-colors shadow-md"
           >
-            Live Camera & AI Feed
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Download Project Files</span>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
           </button>
 
-          <button
-            id="tab-map"
-            onClick={() => onSelectTab('MAP')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-              activeTab === 'MAP'
-                ? 'bg-emerald-600 text-white shadow'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            Gudalur Tactical Map
-          </button>
+          {showDownloadMenu && (
+            <div className="absolute right-0 mt-1.5 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-2 z-50 text-xs space-y-1 animate-fade-in">
+              <div className="px-2 py-1 text-[10px] font-mono text-slate-400 uppercase border-b border-slate-800">
+                Academic & Project Artifacts
+              </div>
 
-          <button
-            id="tab-forest-dispatch"
-            onClick={() => onSelectTab('FOREST_DISPATCH')}
-            className={`relative px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'FOREST_DISPATCH'
-                ? 'bg-red-600 text-white shadow'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            <span>Forest Dept Dispatch</span>
-            {activeAlertCount > 0 && (
-              <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full animate-pulse">
-                {activeAlertCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            id="tab-casualties"
-            onClick={() => onSelectTab('CASUALTIES')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-              activeTab === 'CASUALTIES'
-                ? 'bg-rose-700 text-white shadow'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            Human Casualties Research
-          </button>
-
-          <button
-            id="tab-feed"
-            onClick={() => onSelectTab('FEED')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-              activeTab === 'FEED'
-                ? 'bg-cyan-600 text-white shadow'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            My Event Log
-          </button>
-
-          {/* Download Project Files Dropdown */}
-          <div className="relative">
-            <button
-              id="btn-download-menu"
-              onClick={() => setShowDownloadMenu(!showDownloadMenu)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white shadow transition-all"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download Files</span>
-              <ChevronDown className="w-3 h-3 opacity-80" />
-            </button>
-
-            {showDownloadMenu && (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setShowDownloadMenu(false)}
-                />
-                <div className="absolute right-0 mt-2 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-2 z-50 text-xs space-y-1">
-                  <div className="px-2.5 py-1.5 text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider border-b border-slate-800">
-                    Project Downloads & Reports
-                  </div>
-
-                  <button
-                    id="btn-dl-report"
-                    onClick={() => {
-                      onDownloadReport();
-                      setShowDownloadMenu(false);
-                    }}
-                    className="w-full flex items-start gap-2.5 p-2 rounded-lg hover:bg-slate-800 text-left text-slate-200 transition-colors"
-                  >
-                    <FileText className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-semibold text-slate-100">Project Thesis Report (.md)</div>
-                      <div className="text-[10px] text-slate-400">Full college research report & specs</div>
-                    </div>
-                  </button>
-
-                  <button
-                    id="btn-dl-casualties-csv"
-                    onClick={() => {
-                      onDownloadCasualtiesCSV();
-                      setShowDownloadMenu(false);
-                    }}
-                    className="w-full flex items-start gap-2.5 p-2 rounded-lg hover:bg-slate-800 text-left text-slate-200 transition-colors"
-                  >
-                    <FileSpreadsheet className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-semibold text-slate-100">Fatalities Dataset (.csv)</div>
-                      <div className="text-[10px] text-slate-400">Gudalur conflict records & GPS</div>
-                    </div>
-                  </button>
-
-                  <button
-                    id="btn-dl-alerts-csv"
-                    onClick={() => {
-                      onDownloadAlertsCSV();
-                      setShowDownloadMenu(false);
-                    }}
-                    className="w-full flex items-start gap-2.5 p-2 rounded-lg hover:bg-slate-800 text-left text-slate-200 transition-colors"
-                  >
-                    <FileSpreadsheet className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-semibold text-slate-100">Dispatch Tickets Log (.csv)</div>
-                      <div className="text-[10px] text-slate-400">Forest Dept alerts & SOP tickets</div>
-                    </div>
-                  </button>
-
-                  <div className="border-t border-slate-800 my-1"></div>
-
-                  <button
-                    id="btn-dl-app-source-zip"
-                    onClick={() => {
-                      setShowZipModal(true);
-                      setShowDownloadMenu(false);
-                    }}
-                    className="w-full flex items-start gap-2.5 p-2 rounded-lg hover:bg-emerald-950/40 text-left text-emerald-300 transition-colors"
-                  >
-                    <FolderArchive className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-semibold text-emerald-300">Download App Source (ZIP)</div>
-                      <div className="text-[10px] text-emerald-500">Export complete codebase</div>
-                    </div>
-                  </button>
+              <button
+                onClick={() => {
+                  onDownloadReport();
+                  setShowDownloadMenu(false);
+                }}
+                className="w-full text-left p-2 rounded-lg hover:bg-slate-800 text-slate-200 transition-colors flex items-center gap-2.5"
+              >
+                <FileText className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div>
+                  <div className="font-semibold text-slate-100">Project Thesis Report (.md)</div>
+                  <div className="text-[10px] text-slate-400">Comprehensive college report & SOP documentation</div>
                 </div>
-              </>
-            )}
-          </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  onDownloadCasualtiesCSV();
+                  setShowDownloadMenu(false);
+                }}
+                className="w-full text-left p-2 rounded-lg hover:bg-slate-800 text-slate-200 transition-colors flex items-center gap-2.5"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-rose-400 shrink-0" />
+                <div>
+                  <div className="font-semibold text-slate-100">Conflict Fatalities Dataset (.csv)</div>
+                  <div className="text-[10px] text-slate-400">Recorded cases with GPS and low-light factors</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  onDownloadAlertsCSV();
+                  setShowDownloadMenu(false);
+                }}
+                className="w-full text-left p-2 rounded-lg hover:bg-slate-800 text-slate-200 transition-colors flex items-center gap-2.5"
+              >
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                <div>
+                  <div className="font-semibold text-slate-100">RRT Dispatch Log (.csv)</div>
+                  <div className="text-[10px] text-slate-400">Forest Department tickets & checkup logs</div>
+                </div>
+              </button>
+
+              <div className="border-t border-slate-800 pt-1">
+                <button
+                  onClick={() => {
+                    setShowZipModal(true);
+                    setShowDownloadMenu(false);
+                  }}
+                  className="w-full text-left p-2 rounded-lg hover:bg-emerald-950/60 text-emerald-300 transition-colors flex items-center gap-2.5"
+                >
+                  <FolderArchive className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div>
+                    <div className="font-bold">Full App Code (ZIP Instructions)</div>
+                    <div className="text-[10px] text-emerald-400/80">How to export entire source code</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Navigation Tabs (Upgrade 15: Complete 11-Tab Suite) */}
+      <div className="bg-slate-900 border-t border-slate-800/80 px-4">
+        <nav className="max-w-7xl mx-auto flex items-center gap-1 overflow-x-auto py-1 scrollbar-thin scrollbar-thumb-slate-700">
+          {[
+            { key: 'DASHBOARD', label: 'Dashboard', icon: Activity },
+            { key: 'SURVEILLANCE', label: 'Live Cameras', icon: Camera },
+            { key: 'MAP', label: 'Wildlife Map', icon: Layers },
+            {
+              key: 'FOREST_DISPATCH',
+              label: 'Alerts',
+              icon: ShieldAlert,
+              badge: activeAlertCount > 0 ? activeAlertCount : undefined,
+            },
+            { key: 'INCIDENTS', label: 'Incidents', icon: FileText },
+            { key: 'ANIMAL_ACTIVITY', label: 'Animal Activity', icon: Compass },
+            { key: 'ANALYTICS', label: 'Analytics', icon: BarChart3 },
+            { key: 'CASUALTIES', label: 'Research Archive', icon: Trees },
+            { key: 'CAMERAS', label: 'Cameras', icon: Sliders },
+            { key: 'SYSTEM_HEALTH', label: 'System Health', icon: Server },
+            { key: 'FEED', label: 'Event Feed', icon: Eye },
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => onSelectTab(tab.key as ActiveTabType)}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+                  isActive
+                    ? 'bg-slate-800 text-white border border-slate-700 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-emerald-400' : 'text-slate-400'}`} />
+                <span>{tab.label}</span>
+                {tab.badge !== undefined && (
+                  <span className="bg-red-600 text-white font-mono text-[10px] px-1.5 py-0.2 rounded-full font-bold">
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
-      {/* Modal: How to Download App Source ZIP */}
+      {/* ZIP Download Instructions Modal */}
       {showZipModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 w-full max-w-md rounded-2xl p-6 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2 text-emerald-400 font-bold">
-                <FolderArchive className="w-5 h-5" />
-                <span>Export & Download Codebase (ZIP)</span>
+              <div className="flex items-center gap-2">
+                <FolderArchive className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-bold text-white text-base">Export Full Project ZIP</h3>
               </div>
-              <button
-                onClick={() => setShowZipModal(false)}
-                className="text-slate-400 hover:text-white text-lg font-mono"
-              >
-                ✕
-              </button>
+              <button onClick={() => setShowZipModal(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
-            <div className="text-xs text-slate-300 space-y-3 leading-relaxed">
+            <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
               <p>
-                To download the <strong>complete application code</strong> as a ZIP file to your computer:
+                To download the entire application repository (including all TypeScript source files, React components, GIS datasets, and Vite config) for local execution in VS Code:
               </p>
-              <ol className="list-decimal list-inside space-y-2 bg-slate-950 p-3 rounded-lg border border-slate-800 text-slate-300">
-                <li>
-                  Look at the <strong>top-right corner of Google AI Studio</strong>.
-                </li>
-                <li>
-                  Click on the <strong>Settings / Menu</strong> icon (gear or <strong>•••</strong> icon).
-                </li>
-                <li>
-                  Select <strong>"Export to ZIP"</strong> (or <strong>"Export to GitHub"</strong>).
-                </li>
-                <li>Your browser will instantly download the complete repository ZIP file containing all source files, models, and dependencies.</li>
-              </ol>
-
-              <div className="bg-emerald-950/60 border border-emerald-800/80 p-2.5 rounded-lg text-[11px] text-emerald-300">
-                💡 <strong>Tip:</strong> You can also download the project report (.md) or conflict dataset (.csv) instantly from the <strong>Download Files</strong> menu above!
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2 font-mono text-[11px] text-emerald-300">
+                <div>1. In Google AI Studio, look at the upper-right corner.</div>
+                <div>2. Click the <b>Menu (•••)</b> or <b>Settings</b> icon.</div>
+                <div>3. Select <b>Export to ZIP</b> (or Export to GitHub).</div>
+                <div>4. Extract the ZIP on your computer.</div>
+                <div>5. Run <code className="text-amber-300">npm install</code> and <code className="text-amber-300">npm run dev</code>.</div>
               </div>
             </div>
 
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => setShowZipModal(false)}
-                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition-colors"
-              >
-                Got It
-              </button>
-            </div>
+            <button
+              onClick={() => setShowZipModal(false)}
+              className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs"
+            >
+              Got It
+            </button>
           </div>
         </div>
       )}

@@ -1,8 +1,20 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
-import { CameraNode, ConflictIncidentRecord, ForestDeptAlert } from '../types/surveillance';
-import { GUDALUR_CENTER } from '../data/gudalurData';
-import { MapPin, Navigation, ShieldAlert, Eye, Radio } from 'lucide-react';
+import { CameraNode, ConflictIncidentRecord, ForestDeptAlert, WildlifeSightingTrack } from '../types/surveillance';
+import { GUDALUR_CENTER, SETTLEMENTS_DATA, ROADS_DATA, INITIAL_MOVEMENT_TRACKS } from '../data/gudalurData';
+import {
+  MapPin,
+  Navigation,
+  ShieldAlert,
+  Eye,
+  Radio,
+  Filter,
+  Layers,
+  Compass,
+  Home,
+  Route,
+  Activity,
+} from 'lucide-react';
 
 interface GudalurMapProps {
   cameras: CameraNode[];
@@ -12,6 +24,8 @@ interface GudalurMapProps {
   historicalCasualties: ConflictIncidentRecord[];
   showCasualtyHotspots: boolean;
   onToggleCasualties: () => void;
+  movementTracks?: WildlifeSightingTrack[];
+  onViewEvidence?: (item: any) => void;
 }
 
 export const GudalurMap: React.FC<GudalurMapProps> = ({
@@ -22,14 +36,29 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
   historicalCasualties,
   showCasualtyHotspots,
   onToggleCasualties,
+  movementTracks = INITIAL_MOVEMENT_TRACKS,
+  onViewEvidence,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
+
+  // Layers
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const casualtiesLayerRef = useRef<L.LayerGroup | null>(null);
   const corridorsLayerRef = useRef<L.LayerGroup | null>(null);
+  const settlementsLayerRef = useRef<L.LayerGroup | null>(null);
+  const roadsLayerRef = useRef<L.LayerGroup | null>(null);
+  const movementTracksLayerRef = useRef<L.LayerGroup | null>(null);
 
-  // Initialize Map once
+  // Filter state (Upgrade 5)
+  const [filterSpecies, setFilterSpecies] = useState<string>('ALL');
+  const [filterRisk, setFilterRisk] = useState<string>('ALL');
+  const [showSettlements, setShowSettlements] = useState<boolean>(true);
+  const [showRoads, setShowRoads] = useState<boolean>(true);
+  const [showMovementTrail, setShowMovementTrail] = useState<boolean>(true);
+  const [showFilterDrawer, setShowFilterDrawer] = useState<boolean>(false);
+
+  // Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapInstanceRef.current) return;
@@ -41,7 +70,7 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
       attributionControl: false,
     });
 
-    // Dark high-contrast carto tiles suitable for 24/7 surveillance monitoring
+    // Dark high-contrast carto tiles
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 19,
       subdomains: 'abcd',
@@ -50,21 +79,23 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
     markersLayerRef.current = L.layerGroup().addTo(map);
     casualtiesLayerRef.current = L.layerGroup().addTo(map);
     corridorsLayerRef.current = L.layerGroup().addTo(map);
+    settlementsLayerRef.current = L.layerGroup().addTo(map);
+    roadsLayerRef.current = L.layerGroup().addTo(map);
+    movementTracksLayerRef.current = L.layerGroup().addTo(map);
 
-    // Draw documented Elephant Corridors in Gudalur Division
     // Corridor 1: O-Valley through Gudalur to Mudumalai
     const oValleyCorridor = L.polyline(
       [
-        [11.4650, 76.4520],
-        [11.4872, 76.5410],
+        [11.465, 76.452],
+        [11.4872, 76.541],
         [11.5034, 76.4913],
-        [11.5378, 76.5390],
+        [11.5378, 76.539],
       ],
       {
         color: '#f59e0b',
         weight: 3,
         dashArray: '6, 8',
-        opacity: 0.7,
+        opacity: 0.8,
       }
     ).bindTooltip('Known Elephant Migration Corridor (O-Valley ⇄ Mudumalai Buffer)', {
       sticky: true,
@@ -76,13 +107,13 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
       [
         [11.5301, 76.2845],
         [11.4889, 76.3312],
-        [11.4815, 76.3820],
+        [11.4815, 76.382],
       ],
       {
         color: '#f97316',
         weight: 3,
         dashArray: '6, 8',
-        opacity: 0.7,
+        opacity: 0.8,
       }
     ).bindTooltip('High Conflict Wildlife Passage (Cherambadi ⇄ Pandalur ⇄ Devala)', {
       sticky: true,
@@ -100,7 +131,112 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
     };
   }, []);
 
-  // Update Camera Markers
+  // Update Settlements & Roads Layers (Upgrade 5)
+  useEffect(() => {
+    const sLayer = settlementsLayerRef.current;
+    const rLayer = roadsLayerRef.current;
+    if (!sLayer || !rLayer) return;
+
+    sLayer.clearLayers();
+    rLayer.clearLayers();
+
+    if (showSettlements) {
+      SETTLEMENTS_DATA.forEach((st) => {
+        const isConflict = st.riskZone === 'HIGH_CONFLICT';
+        const html = `
+          <div class="relative flex items-center justify-center cursor-pointer group">
+            <div style="background-color: ${isConflict ? '#881337' : '#1e293b'}; border: 1.5px solid ${isConflict ? '#f43f5e' : '#64748b'};"
+                 class="w-6 h-6 rounded-md flex items-center justify-center text-white text-[10px] shadow-lg">
+              ⌂
+            </div>
+            <div class="absolute -bottom-4 whitespace-nowrap bg-slate-950/90 text-[9px] font-mono text-slate-300 px-1 rounded border border-slate-700">
+              ${st.name.split(' ')[0]}
+            </div>
+          </div>
+        `;
+        const icon = L.divIcon({ html, className: 'settlement-marker', iconSize: [24, 24], iconAnchor: [12, 12] });
+        const marker = L.marker(st.coordinates, { icon });
+        marker.bindPopup(`
+          <div class="p-1 space-y-1 text-xs">
+            <div class="font-bold text-white border-b border-slate-700 pb-1">${st.name}</div>
+            <div class="text-slate-300">Type: <b>${st.type.replace('_', ' ')}</b></div>
+            <div class="text-slate-400">Est. Pop: ${st.populationEstimate.toLocaleString()} residents</div>
+            <div class="text-[11px] ${isConflict ? 'text-rose-400 font-bold' : 'text-slate-400'}">Risk Zone: ${st.riskZone}</div>
+          </div>
+        `);
+        sLayer.addLayer(marker);
+      });
+    }
+
+    if (showRoads) {
+      ROADS_DATA.forEach((road) => {
+        const poly = L.polyline(road.coordinates, {
+          color: road.type === 'NATIONAL_HIGHWAY' ? '#38bdf8' : '#94a3b8',
+          weight: road.type === 'NATIONAL_HIGHWAY' ? 3.5 : 2,
+          opacity: 0.6,
+        }).bindTooltip(road.name, {
+          sticky: true,
+          className: 'bg-slate-900 text-sky-300 text-xs px-2 py-1 rounded border border-sky-800',
+        });
+        rLayer.addLayer(poly);
+      });
+    }
+  }, [showSettlements, showRoads]);
+
+  // Update Movement Sequence Tracks (Upgrade 6)
+  useEffect(() => {
+    const layer = movementTracksLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+
+    if (!showMovementTrail || movementTracks.length === 0) return;
+
+    // Filter tracks
+    const activeTracks = movementTracks.filter((t) => {
+      if (filterSpecies !== 'ALL' && !t.species.toLowerCase().includes(filterSpecies.toLowerCase())) return false;
+      if (filterRisk !== 'ALL' && t.risk !== filterRisk) return false;
+      return true;
+    });
+
+    if (activeTracks.length < 2) return;
+
+    // Draw sequential connecting vector lines
+    const coords = activeTracks.map((t) => t.coordinates);
+    const vectorLine = L.polyline(coords, {
+      color: '#06b6d4',
+      weight: 3,
+      dashArray: '8, 6',
+      opacity: 0.85,
+    }).bindTooltip('Multi-Camera Temporal Ingress Vector Sequence [DEMO DATA]', {
+      sticky: true,
+      className: 'bg-slate-900 text-cyan-300 text-xs px-2 py-1 rounded border border-cyan-800',
+    });
+    layer.addLayer(vectorLine);
+
+    // Place numbered sequence markers
+    activeTracks.forEach((t) => {
+      const html = `
+        <div class="relative flex items-center justify-center cursor-pointer">
+          <div class="w-6 h-6 rounded-full bg-cyan-950 border-2 border-cyan-400 text-cyan-300 text-[10px] font-mono font-bold flex items-center justify-center shadow-lg">
+            ${t.sequenceOrder}
+          </div>
+        </div>
+      `;
+      const icon = L.divIcon({ html, className: 'track-step-pin', iconSize: [24, 24], iconAnchor: [12, 12] });
+      const marker = L.marker(t.coordinates, { icon });
+      marker.bindPopup(`
+        <div class="p-1 space-y-1 text-xs">
+          <div class="font-bold text-cyan-300 border-b border-cyan-900 pb-1">Sighting Step #${t.sequenceOrder}</div>
+          <div class="text-white font-semibold">${t.species}</div>
+          <div class="text-slate-400 font-mono">${t.timestamp} • ${t.cameraName}</div>
+          <div class="text-slate-300 text-[11px]">${t.direction || 'In Transit'}</div>
+        </div>
+      `);
+      layer.addLayer(marker);
+    });
+  }, [showMovementTrail, movementTracks, filterSpecies, filterRisk]);
+
+  // Update Camera & Active Detection Markers
   useEffect(() => {
     const map = mapInstanceRef.current;
     const layer = markersLayerRef.current;
@@ -112,31 +248,34 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
       const isSelected = cam.id === activeCameraId;
       const isPersonal = cam.isPersonalCamera;
 
-      // Check if this camera has an active critical alert
-      const hasAlert = recentAlerts.some(
-        (a) => a.cameraId === cam.id && a.status !== 'ON_SITE_VERIFIED'
+      // Filter check
+      const camAlerts = recentAlerts.filter((a) => a.cameraId === cam.id);
+      const activeAlert = camAlerts.find(
+        (a) => a.status !== 'ON_SITE_VERIFIED' && a.status !== 'RESOLVED' && a.status !== 'FALSE_POSITIVE'
       );
 
-      // Distinct styling for Personal Camera vs CCTV nodes
-      const markerColor = hasAlert
-        ? '#ef4444' // Red alert
-        : isPersonal
-        ? '#06b6d4' // Cyan personal
-        : '#10b981'; // Green normal
+      if (filterRisk !== 'ALL' && activeAlert && activeAlert.threatLevel !== filterRisk) {
+        // Skip if risk doesn't match
+      }
+
+      const hasAlert = !!activeAlert;
+      const markerColor = hasAlert ? '#ef4444' : isPersonal ? '#06b6d4' : '#10b981';
 
       const pulseRing = hasAlert
-        ? `<div className="absolute -inset-2 rounded-full animate-ping bg-red-500/40"></div>`
+        ? `<div class="absolute -inset-2 rounded-full animate-ping bg-red-500/40"></div>`
         : isSelected
-        ? `<div className="absolute -inset-1.5 rounded-full ring-2 ring-emerald-400 animate-pulse"></div>`
+        ? `<div class="absolute -inset-1.5 rounded-full ring-2 ring-emerald-400 animate-pulse"></div>`
         : '';
 
+      const iconLabel = hasAlert ? '⚠️' : isPersonal ? '★' : 'CAM';
+
       const html = `
-        <div className="relative flex items-center justify-center cursor-pointer group">
+        <div class="relative flex items-center justify-center cursor-pointer group">
           ${pulseRing}
-          <div style="background-color: ${markerColor};" className="w-8 h-8 rounded-full border-2 border-slate-900 flex items-center justify-center shadow-lg text-slate-950 font-bold text-xs">
-            ${isPersonal ? '★' : 'CAM'}
+          <div style="background-color: ${markerColor};" class="w-8 h-8 rounded-full border-2 border-slate-900 flex items-center justify-center shadow-lg text-slate-950 font-bold text-xs">
+            ${iconLabel}
           </div>
-          <div className="absolute -bottom-5 whitespace-nowrap bg-slate-950/90 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded border border-slate-700 text-slate-200">
+          <div class="absolute -bottom-5 whitespace-nowrap bg-slate-950/90 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded border border-slate-700 text-slate-200">
             ${cam.isPersonalCamera ? 'MY CAMERA' : cam.name.split(' ')[0]}
           </div>
         </div>
@@ -151,7 +290,6 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
 
       const marker = L.marker(cam.coordinates, { icon: customIcon });
 
-      // Coverage visual circle
       const coverageCircle = L.circle(cam.coordinates, {
         radius: isPersonal ? 450 : 600,
         color: markerColor,
@@ -166,16 +304,27 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
       });
 
       const popupContent = `
-        <div className="p-1 space-y-1.5 text-xs">
-          <div className="font-bold text-slate-100 flex items-center justify-between gap-2 border-b border-slate-700 pb-1">
+        <div class="p-1 space-y-1.5 text-xs">
+          <div class="font-bold text-slate-100 flex items-center justify-between gap-2 border-b border-slate-700 pb-1">
             <span>${cam.name}</span>
-            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono ${isPersonal ? 'bg-cyan-950 text-cyan-400 border border-cyan-700' : 'bg-emerald-950 text-emerald-400 border border-emerald-700'}">${cam.status}</span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-mono ${
+              isPersonal
+                ? 'bg-cyan-950 text-cyan-400 border border-cyan-700'
+                : 'bg-emerald-950 text-emerald-400 border border-emerald-700'
+            }">${cam.status}</span>
           </div>
-          <div className="text-slate-300"><b>Sector:</b> ${cam.sector}</div>
-          <div className="text-slate-400 font-mono text-[11px]"><b>GPS:</b> ${cam.coordinates[0].toFixed(4)}° N, ${cam.coordinates[1].toFixed(4)}° E</div>
-          <div className="text-slate-300"><b>Low Light Sensor:</b> <span className="text-emerald-400">${cam.lowLightMode}</span> (0.0${Math.floor(cam.currentLux * 100)} Lux)</div>
-          <div className="text-slate-400"><b>24/7 Power:</b> ${cam.batteryPercent}% (${cam.solarStatus})</div>
-          ${hasAlert ? '<div className="mt-1 text-red-400 font-bold bg-red-950/60 p-1 rounded border border-red-800">⚠️ ACTIVE WILD ANIMAL ALERT DISPATCHED</div>' : ''}
+          <div class="text-slate-300"><b>Sector:</b> ${cam.sector}</div>
+          <div class="text-slate-400 font-mono text-[11px]"><b>GPS:</b> ${cam.coordinates[0].toFixed(4)}° N, ${cam.coordinates[1].toFixed(4)}° E</div>
+          <div class="text-slate-300"><b>Low Light Sensor:</b> <span class="text-emerald-400">${cam.lowLightMode}</span> (${cam.currentLux} Lux)</div>
+          <div class="text-slate-400"><b>Power:</b> ${cam.batteryPercent}% (${cam.solarStatus})</div>
+          ${
+            hasAlert
+              ? `<div class="mt-1 text-red-300 font-bold bg-red-950/80 p-1.5 rounded border border-red-700">
+                  ⚠️ ACTIVE ALERT: ${activeAlert.species} (${activeAlert.threatLevel})
+                  <div class="text-[10px] text-slate-300 font-normal mt-0.5">${activeAlert.suggestedAction}</div>
+                </div>`
+              : ''
+          }
         </div>
       `;
 
@@ -183,52 +332,40 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
       layer.addLayer(coverageCircle);
       layer.addLayer(marker);
     });
-  }, [cameras, activeCameraId, recentAlerts, onSelectCamera]);
+  }, [cameras, activeCameraId, recentAlerts, onSelectCamera, filterRisk]);
 
-  // Update Historical Casualty Hotspots Layer
+  // Update Casualty Hotspots Layer
   useEffect(() => {
     const layer = casualtiesLayerRef.current;
     if (!layer) return;
-
     layer.clearLayers();
 
     if (!showCasualtyHotspots) return;
 
     historicalCasualties.forEach((record) => {
       const html = `
-        <div className="relative flex items-center justify-center cursor-pointer">
-          <div className="w-6 h-6 rounded-full bg-rose-950 border-2 border-rose-500 flex items-center justify-center text-rose-300 text-[11px] font-bold shadow-md hover:scale-125 transition-transform">
+        <div class="relative flex items-center justify-center cursor-pointer">
+          <div class="w-6 h-6 rounded-full bg-rose-950 border-2 border-rose-500 flex items-center justify-center text-rose-300 text-[11px] font-bold shadow-md hover:scale-125 transition-transform">
             ✝
           </div>
         </div>
       `;
-
-      const casualtyIcon = L.divIcon({
-        html,
-        className: 'custom-casualty-pin',
-        iconSize: [24, 24],
-        iconAnchor: [12, 12],
-      });
-
+      const casualtyIcon = L.divIcon({ html, className: 'custom-casualty-pin', iconSize: [24, 24], iconAnchor: [12, 12] });
       const marker = L.marker(record.coordinates, { icon: casualtyIcon });
 
       const popup = `
-        <div className="p-1 space-y-1 text-xs">
-          <div className="font-bold text-rose-400 border-b border-rose-900/60 pb-1 flex items-center justify-between">
+        <div class="p-1 space-y-1 text-xs">
+          <div class="font-bold text-rose-400 border-b border-rose-900/60 pb-1 flex items-center justify-between">
             <span>Historical Fatality Record</span>
-            <span className="text-slate-400">${record.date}</span>
+            <span class="text-slate-400">${record.date}</span>
           </div>
-          <div className="text-slate-200"><b>Sector:</b> ${record.sector}</div>
-          <div className="text-amber-400 font-medium"><b>Victim:</b> ${record.victimProfile}</div>
-          <div className="text-red-300"><b>Animal:</b> ${record.animalInvolved}</div>
-          <div className="text-slate-400"><b>Time:</b> ${record.timeOfDay}</div>
-          <div className="text-slate-300 text-[11px] mt-1 italic">${record.circumstance}</div>
-          <div className="mt-1 text-emerald-300 text-[11px] bg-emerald-950/50 p-1 rounded border border-emerald-800">
-            <b>Mitigation:</b> ${record.mitigationImpact}
-          </div>
+          <div class="text-slate-200"><b>Sector:</b> ${record.sector}</div>
+          <div class="text-amber-400 font-medium"><b>Victim:</b> ${record.victimProfile}</div>
+          <div class="text-red-300"><b>Animal:</b> ${record.animalInvolved}</div>
+          <div class="text-slate-400"><b>Time:</b> ${record.timeOfDay}</div>
+          <div class="text-slate-300 text-[11px] mt-1 italic">${record.circumstance}</div>
         </div>
       `;
-
       marker.bindPopup(popup);
       layer.addLayer(marker);
     });
@@ -249,16 +386,15 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
   };
 
   return (
-    <div id="gudalur-surveillance-map-container" className="relative w-full h-full min-h-[420px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950 flex flex-col shadow-xl">
-      {/* Map Control Header */}
+    <div id="gudalur-surveillance-map-container" className="relative w-full h-full min-h-[440px] rounded-xl overflow-hidden border border-slate-800 bg-slate-950 flex flex-col shadow-xl">
+      {/* Top Map Action Ribbon */}
       <div className="absolute top-3 left-3 z-[400] flex flex-wrap items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-2 rounded-lg border border-slate-700 shadow-xl">
         <div className="flex items-center gap-2 pr-2 border-r border-slate-700">
           <MapPin className="w-4 h-4 text-emerald-400" />
-          <span className="text-xs font-semibold text-slate-200">Nilgiris Gudalur Tactical Grid</span>
+          <span className="text-xs font-semibold text-slate-200">Nilgiris Tactical Grid</span>
         </div>
 
         <button
-          id="btn-center-my-cam"
           onClick={handleCenterOnPersonalCam}
           className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 transition-colors"
         >
@@ -267,59 +403,128 @@ export const GudalurMap: React.FC<GudalurMapProps> = ({
         </button>
 
         <button
-          id="btn-center-gudalur-overview"
           onClick={handleCenterOnGudalur}
           className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 transition-colors"
         >
           <Radio className="w-3.5 h-3.5 text-amber-400" />
-          Gudalur Division View
+          Division View
         </button>
 
         <button
-          id="btn-toggle-casualty-pins"
-          onClick={onToggleCasualties}
+          onClick={() => setShowFilterDrawer(!showFilterDrawer)}
           className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-colors ${
-            showCasualtyHotspots
-              ? 'bg-rose-950 text-rose-300 border-rose-800 ring-1 ring-rose-500'
-              : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-slate-200'
+            showFilterDrawer ? 'bg-emerald-950 text-emerald-300 border-emerald-700' : 'bg-slate-800 text-slate-300 border-slate-700'
           }`}
         >
-          <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-          {showCasualtyHotspots ? 'Hide Fatality Hotspots' : 'Show Fatality Hotspots'}
+          <Filter className="w-3.5 h-3.5" />
+          <span>Filters & Layers</span>
         </button>
       </div>
 
+      {/* Filter & Layer Drawer (Upgrade 5) */}
+      {showFilterDrawer && (
+        <div className="absolute top-14 left-3 z-[400] bg-slate-900/95 backdrop-blur-md p-4 rounded-xl border border-slate-700 shadow-2xl text-xs space-y-3 max-w-xs animate-fade-in">
+          <div className="font-bold text-white border-b border-slate-700 pb-1.5 flex items-center justify-between">
+            <span>Map Layers & Filters</span>
+            <span className="text-[10px] text-slate-400 font-mono">GIS CONTROLS</span>
+          </div>
+
+          {/* Toggle Layers */}
+          <div className="space-y-1.5">
+            <span className="text-slate-400 font-mono text-[10px] uppercase">Toggle Overlays:</span>
+            <div className="flex flex-col gap-1.5 text-slate-300">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showCasualtyHotspots}
+                  onChange={onToggleCasualties}
+                  className="rounded text-rose-500 focus:ring-0"
+                />
+                <span>Fatality Hotspots (Historical)</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showSettlements}
+                  onChange={() => setShowSettlements(!showSettlements)}
+                  className="rounded text-emerald-500 focus:ring-0"
+                />
+                <span>Villages & Worker Quarters</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showRoads}
+                  onChange={() => setShowRoads(!showRoads)}
+                  className="rounded text-sky-500 focus:ring-0"
+                />
+                <span>Highway & Arterial Roads</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showMovementTrail}
+                  onChange={() => setShowMovementTrail(!showMovementTrail)}
+                  className="rounded text-cyan-500 focus:ring-0"
+                />
+                <span>Ingress Movement Vectors</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Risk Level Filter */}
+          <div className="space-y-1">
+            <span className="text-slate-400 font-mono text-[10px] uppercase">Risk Level:</span>
+            <select
+              value={filterRisk}
+              onChange={(e) => setFilterRisk(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-200"
+            >
+              <option value="ALL">All Risk Levels</option>
+              <option value="CRITICAL">Critical Alerts Only</option>
+              <option value="HIGH">High Risk</option>
+              <option value="MEDIUM">Medium Risk</option>
+            </select>
+          </div>
+        </div>
+      )}
+
       {/* Map Legend Overlay */}
-      <div className="absolute bottom-3 right-3 z-[400] bg-slate-900/90 backdrop-blur-md px-3 py-2.5 rounded-lg border border-slate-800 shadow-xl text-[11px] space-y-1.5">
+      <div className="absolute bottom-3 right-3 z-[400] bg-slate-900/90 backdrop-blur-md px-3.5 py-2.5 rounded-lg border border-slate-800 shadow-xl text-[11px] space-y-1.5 max-w-[240px]">
         <div className="font-semibold text-slate-300 flex items-center justify-between gap-3 text-xs border-b border-slate-800 pb-1">
-          <span>Surveillance Legend</span>
-          <span className="text-emerald-400 font-mono">24/7 Active</span>
+          <span>Tactical Map Legend</span>
+          <span className="text-emerald-400 font-mono">24/7 Grid</span>
         </div>
         <div className="flex items-center gap-2 text-slate-300">
-          <span className="w-3 h-3 rounded-full bg-cyan-400 inline-block border border-slate-900"></span>
-          <span>My Personal Camera (Field Post)</span>
+          <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block border border-slate-900"></span>
+          <span>My Personal Camera Post</span>
         </div>
         <div className="flex items-center gap-2 text-slate-300">
-          <span className="w-3 h-3 rounded-full bg-emerald-500 inline-block border border-slate-900"></span>
-          <span>Network CCTV (O-Valley / Devala / Pandalur)</span>
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block border border-slate-900"></span>
+          <span>Network CCTV Camera Node</span>
         </div>
-        <div className="flex items-center gap-2 text-slate-300">
-          <span className="w-3 h-3 rounded-full bg-red-500 inline-block animate-pulse border border-slate-900"></span>
-          <span>Active Animal Incursion Alert</span>
+        <div className="flex items-center gap-2 text-rose-400">
+          <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block animate-pulse border border-slate-900"></span>
+          <span>Active Wildlife Incursion</span>
         </div>
         <div className="flex items-center gap-2 text-amber-300">
-          <span className="w-4 h-0.5 bg-amber-400 inline-block border-t border-dashed"></span>
+          <span className="w-3.5 h-0.5 bg-amber-400 inline-block border-t border-dashed"></span>
           <span>Elephant Migration Corridor</span>
         </div>
-        {showCasualtyHotspots && (
-          <div className="flex items-center gap-2 text-rose-300">
-            <span className="w-3.5 h-3.5 rounded-full bg-rose-950 border border-rose-500 text-rose-300 flex items-center justify-center text-[9px] font-bold">✝</span>
-            <span>Historical Human Fatality Record</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2 text-cyan-300">
+          <span className="w-3.5 h-0.5 bg-cyan-400 inline-block border-t border-dashed"></span>
+          <span>Ingress Sequence Trail (Demo)</span>
+        </div>
+        <div className="flex items-center gap-2 text-slate-300">
+          <span className="text-[10px]">⌂</span>
+          <span>Village / Worker Quarters</span>
+        </div>
       </div>
 
-      {/* Actual Leaflet Container */}
+      {/* Leaflet container */}
       <div ref={mapContainerRef} className="w-full h-full flex-1" />
     </div>
   );

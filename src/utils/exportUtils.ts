@@ -1,4 +1,4 @@
-import { ConflictIncidentRecord, ForestDeptAlert } from '../types/surveillance';
+import { ConflictIncidentRecord, ForestDeptAlert, IncidentRecord, WildlifeSightingTrack } from '../types/surveillance';
 
 /**
  * Triggers a client-side download of a text/blob file
@@ -40,7 +40,7 @@ This project implements an edge-assisted, continuous 24/7 AI vision system coupl
 
 ### 2. CORE SURVEILLANCE & POLICY ENFORCEMENT RULES
 1. **Wild Animal Intrusion Protocol**:
-   - Automated identification of key conflict species (Asian Elephant, Indian Leopard, Bengal Tiger, Sloth Bear, Indian Gaur).
+   - Automated identification of key conflict species (Asian Elephant, Indian Leopard, Bengal Tiger, Sloth Bear, Indian Gaur, Wild Boar).
    - Instant dispatch of actionable ticket with GPS coordinates and SOP to the Tamil Nadu Forest Department Rapid Response Team (RRT).
    - Visual and audible early warning alerts provided 14–22 minutes prior to perimeter breaches.
 2. **False Alarm Suppression Policy**:
@@ -82,7 +82,7 @@ ${
 
 ### 5. SYSTEM ARCHITECTURE & CAMERA TELEMETRY
 - **Sensors:** Sony Starvis 0.001 Lux Night-Vision, 850nm IR Illumination & Real-time WebRTC Webcams.
-- **AI Processing:** Multimodal Vision Model (gemini-3.6-flash) with low-latency local preprocessing.
+- **AI Processing:** Multimodal Vision Model with low-latency local preprocessing.
 - **Latency:** < 1.2s detection-to-ticket generation.
 - **Emergency Helpline:** Tamil Nadu Forest Department Control Room: 04262-261262 / Toll-Free: 1800-425-4545.
 
@@ -171,4 +171,46 @@ export function downloadDispatchLogCSV(alerts: ForestDeptAlert[]) {
     'Forest_Department_Dispatch_Tickets.csv',
     'text/csv;charset=utf-8;'
   );
+}
+
+/**
+ * Downloads Incident Management Records as CSV (Upgrade 8 & 14)
+ */
+export function downloadIncidentsCSV(incidents: IncidentRecord[]) {
+  const headers = [
+    'Incident ID',
+    'Date Time',
+    'Location',
+    'Sector',
+    'Animal',
+    'Severity',
+    'Status',
+    'Assigned Officer',
+    'Description',
+    'Resolution Notes',
+  ];
+
+  const rows = incidents.map((i) => [
+    `"${i.id}"`,
+    `"${i.dateTime}"`,
+    `"${i.location}"`,
+    `"${i.sector}"`,
+    `"${i.animal}"`,
+    `"${i.severity}"`,
+    `"${i.status}"`,
+    `"${i.assignedUser}"`,
+    `"${i.description.replace(/"/g, '""')}"`,
+    `"${(i.resolutionNotes || '').replace(/"/g, '""')}"`,
+  ]);
+
+  const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  triggerFileDownload(csvContent, 'Wildlife_Incidents_Log.csv', 'text/csv;charset=utf-8;');
+}
+
+/**
+ * Exports data as structured JSON (Upgrade 14)
+ */
+export function downloadDatasetJSON(data: any, filename: string) {
+  const jsonStr = JSON.stringify(data, null, 2);
+  triggerFileDownload(jsonStr, filename, 'application/json;charset=utf-8;');
 }
